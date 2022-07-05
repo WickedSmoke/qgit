@@ -6,6 +6,7 @@
 */
 #include <QScrollBar>
 #include <QTextCharFormat>
+#include <QTextStream>
 #include "common.h"
 #include "domain.h"
 #include "git.h"
@@ -117,6 +118,8 @@ void PatchContent::clear() {
 	matches.clear();
 	diffLoaded = false;
 	seekTarget = !target.isEmpty();
+	patchByFile.clear();
+	patchStats.clear();
 }
 
 void PatchContent::refresh() {
@@ -188,6 +191,13 @@ void PatchContent::centerOnFileHeader(StateInfo& st) {
 	target = st.fileName();
 	bool combined = (st.isMerge() && !st.allMergeFiles());
 	git->formatPatchFileHeader(&target, st.sha(), st.diffToSha(), combined, st.allMergeFiles());
+
+	auto it = patchByFile.constFind(target);
+	if (it != patchByFile.constEnd()) {
+		// If target is in the mapping then show per-file changesets.
+		setPlainText(it.value());
+	}
+
 	seekTarget = !target.isEmpty();
 	if (seekTarget)
 		seekTarget = !centerTarget(target);
@@ -213,6 +223,25 @@ void PatchContent::typeWriterFontChanged() {
 
 	setFont(QGit::TYPE_WRITER_FONT);
 	setPlainText(toPlainText());
+}
+
+void PatchContent::parseDiff(const QString &data) {
+
+	static const QString delim = "diff --";
+#if QT_VERSION >= QT_VERSION_CHECK(5,14,0)
+	QStringList lst = data.split("\n" + delim, Qt::SkipEmptyParts);
+#else
+	QStringList lst = data.split("\n" + delim, QString::SkipEmptyParts);
+#endif
+
+	patchStats = "[Large Patch] - Files will be shown individually\n\n";
+	patchStats += lst.takeFirst();
+
+	for (auto& item : lst) {
+		QString file_diff = delim + item;
+		QString first_line = QTextStream(&file_diff).readLine();
+		patchByFile[first_line] = file_diff;
+	}
 }
 
 void PatchContent::processData(const QByteArray& fileChunk, int* prevLineNum) {
@@ -285,8 +314,18 @@ skip_filter:
 	setUpdatesEnabled(false);
 
 	if (prevLineNum || document()->isEmpty()) { // use the faster setPlainText()
+		const int largePatchBytes = 400*1024;
 
-		setPlainText(newLines);
+		// QTextEdit find() & moveCursor(QTextCursor::End) are terribly slow
+		// with long text, so show only individual files if the patch is large.
+
+		if (newLines.size() > largePatchBytes) {
+			parseDiff(newLines);
+			setPlainText(patchStats);
+		} else {
+			setPlainText(newLines);     // Show complete patch.
+		}
+
 		moveCursor(QTextCursor::Start);
 	} else {
 		int topLine = cursorForPosition(QPoint(1, 1)).blockNumber();
